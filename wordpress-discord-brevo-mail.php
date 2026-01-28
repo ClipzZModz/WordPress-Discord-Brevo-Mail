@@ -106,6 +106,17 @@ function wdbm_register_settings() {
 	);
 
 	add_settings_field(
+		'wdbm_brevo_defer_smtp',
+		'Defer to other SMTP plugins',
+		'wdbm_render_checkbox_field',
+		'wdbm-settings',
+		'wdbm_brevo_section',
+		array(
+			'label_for' => 'brevo_defer_smtp',
+		)
+	);
+
+	add_settings_field(
 		'wdbm_brevo_enabled',
 		'Enable Brevo',
 		'wdbm_render_checkbox_field',
@@ -169,6 +180,7 @@ function wdbm_get_settings() {
 	$defaults = array(
 		'discord_enabled'   => 0,
 		'discord_webhook'   => '',
+		'brevo_defer_smtp'  => 0,
 		'brevo_enabled'     => 0,
 		'brevo_api_key'     => '',
 		'brevo_from_email'  => '',
@@ -190,6 +202,7 @@ function wdbm_sanitize_settings( $input ) {
 	$clean['discord_enabled']  = isset( $input['discord_enabled'] ) ? 1 : 0;
 	$clean['discord_webhook']  = isset( $input['discord_webhook'] ) ? esc_url_raw( $input['discord_webhook'] ) : '';
 
+	$clean['brevo_defer_smtp'] = isset( $input['brevo_defer_smtp'] ) ? 1 : 0;
 	$clean['brevo_enabled']    = isset( $input['brevo_enabled'] ) ? 1 : 0;
 	$clean['brevo_api_key']    = isset( $input['brevo_api_key'] ) ? sanitize_text_field( $input['brevo_api_key'] ) : '';
 	$clean['brevo_from_email'] = isset( $input['brevo_from_email'] ) ? sanitize_email( $input['brevo_from_email'] ) : '';
@@ -411,6 +424,28 @@ function wdbm_send_failure_embed( $context, $error_message ) {
 	);
 }
 
+function wdbm_is_other_smtp_active() {
+	if ( ! function_exists( 'is_plugin_active' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	}
+
+	$plugins = array(
+		'wp-mail-smtp/wp_mail_smtp.php',
+		'post-smtp/postman-smtp.php',
+		'fluent-smtp/fluent-smtp.php',
+		'easy-wp-smtp/easy-wp-smtp.php',
+		'smtp-mailer/main.php',
+	);
+
+	foreach ( $plugins as $plugin ) {
+		if ( is_plugin_active( $plugin ) || is_plugin_active_for_network( $plugin ) ) {
+			return $plugin;
+		}
+	}
+
+	return false;
+}
+
 // Contact Form 7 integration (contact form only events for now).
 add_action( 'wpcf7_mail_sent', 'wdbm_handle_cf7_submission' );
 
@@ -465,6 +500,96 @@ function wdbm_handle_cf7_submission( $contact_form ) {
 	}
 }
 
+// WPForms integration.
+add_action( 'wpforms_process_complete', 'wdbm_handle_wpforms_submission', 10, 4 );
+
+function wdbm_handle_wpforms_submission( $fields, $entry, $form_data, $entry_id ) {
+	if ( ! wdbm_discord_enabled() ) {
+		return;
+	}
+
+	$form_title = isset( $form_data['settings']['form_title'] ) ? $form_data['settings']['form_title'] : 'WPForms Form';
+	$form_id = isset( $form_data['id'] ) ? $form_data['id'] : '';
+
+	$embed_fields = array(
+		'Form Title' => $form_title,
+		'Form ID'    => $form_id,
+		'Entry ID'   => $entry_id,
+	);
+
+	foreach ( $fields as $field ) {
+		if ( empty( $field['name'] ) ) {
+			continue;
+		}
+
+		$value = isset( $field['value'] ) ? $field['value'] : '';
+		if ( is_array( $value ) ) {
+			$value = implode( ', ', $value );
+		}
+		$embed_fields[ $field['name'] ] = $value;
+	}
+
+	$sent = wdbm_send_discord_embed(
+		'Contact Form Submission',
+		'A new WPForms submission was received.',
+		$embed_fields,
+		15844367,
+		'wpforms'
+	);
+
+	if ( ! $sent ) {
+		wdbm_send_failure_embed( 'WPForms', 'Discord webhook failed for WPForms submission.' );
+	}
+}
+
+// Gravity Forms integration.
+add_action( 'gform_after_submission', 'wdbm_handle_gravityforms_submission', 10, 2 );
+
+function wdbm_handle_gravityforms_submission( $entry, $form ) {
+	if ( ! wdbm_discord_enabled() ) {
+		return;
+	}
+
+	$form_title = isset( $form['title'] ) ? $form['title'] : 'Gravity Forms Form';
+	$form_id = isset( $form['id'] ) ? $form['id'] : '';
+
+	$embed_fields = array(
+		'Form Title' => $form_title,
+		'Form ID'    => $form_id,
+		'Entry ID'   => isset( $entry['id'] ) ? $entry['id'] : '',
+	);
+
+	if ( isset( $form['fields'] ) && is_array( $form['fields'] ) ) {
+		foreach ( $form['fields'] as $field ) {
+			if ( ! is_object( $field ) || empty( $field->label ) ) {
+				continue;
+			}
+
+			$field_id = (string) $field->id;
+			$value = rgar( $entry, $field_id );
+			if ( is_array( $value ) ) {
+				$value = implode( ', ', $value );
+			}
+			if ( $value === '' || $value === null ) {
+				continue;
+			}
+			$embed_fields[ $field->label ] = $value;
+		}
+	}
+
+	$sent = wdbm_send_discord_embed(
+		'Contact Form Submission',
+		'A new Gravity Forms submission was received.',
+		$embed_fields,
+		10181046,
+		'gravity_forms'
+	);
+
+	if ( ! $sent ) {
+		wdbm_send_failure_embed( 'Gravity Forms', 'Discord webhook failed for Gravity Forms submission.' );
+	}
+}
+
 // Brevo mailer integration.
 add_filter( 'pre_wp_mail', 'wdbm_pre_wp_mail', 10, 2 );
 
@@ -472,6 +597,14 @@ function wdbm_pre_wp_mail( $return, $atts ) {
 	$settings = wdbm_get_settings();
 	if ( empty( $settings['brevo_enabled'] ) ) {
 		return $return;
+	}
+
+	if ( ! empty( $settings['brevo_defer_smtp'] ) ) {
+		$active_smtp = wdbm_is_other_smtp_active();
+		if ( $active_smtp ) {
+			wdbm_log_event( 'brevo', 'wp_mail', 'skipped', 'Deferred to ' . $active_smtp, $atts );
+			return $return;
+		}
 	}
 
 	$result = wdbm_send_brevo_email( $atts );
@@ -578,4 +711,3 @@ function wdbm_send_brevo_email( $atts ) {
 		'message' => 'Sent',
 	);
 }
-

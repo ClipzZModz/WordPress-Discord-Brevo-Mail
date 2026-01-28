@@ -1,17 +1,18 @@
 # WordPress Discord & Brevo Mail
 
 WordPress plugin that:
-- Sends Discord embed notifications for Contact Form 7 submissions.
+- Sends Discord embed notifications for Contact Form 7, WPForms, and Gravity Forms submissions.
 - Routes all WordPress email through Brevo when enabled (exclusive mailer).
 - Records successful and failed sends in a log table with an admin log view.
 
 ## What it does
 Discord:
-- Posts an embed to your Discord webhook on each Contact Form 7 submission.
+- Posts an embed to your Discord webhook on each Contact Form 7, WPForms, and Gravity Forms submission.
 - If a notification fails, it logs the failure and attempts to send a failure embed.
 
 Brevo:
 - Replaces the default WordPress mailer when enabled.
+- Optional "defer" mode: if another SMTP plugin is active, Brevo routing is skipped.
 - Sends all `wp_mail` traffic through Brevo using your configured sender details.
 - Logs success/failure for each email send.
 
@@ -27,3 +28,6 @@ Send logs (success/failure) are stored in a dedicated table and viewable in wp-a
 
 ## License
 GPL-2.0-or-later. See `LICENSE`.
+
+## Changelog
+See `CHANGELOG.md`.
