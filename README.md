@@ -16,6 +16,7 @@ Brevo:
 - Logs success/failure for each email send.
 
 ## Configuration
+Place project in own own folder in wp-content/plugins
 In wp-admin, set:
 - Discord: enable + webhook URL.
 - Brevo: enable + API key + from email + from name + reply-to.
