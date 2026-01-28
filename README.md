@@ -17,7 +17,7 @@ Brevo:
 
 ## Configuration
 - Place project in own own folder in wp-content/plugins
-In wp-admin, set:
+- In wp-admin, set:
 - Discord: enable + webhook URL.
 - Brevo: enable + API key + from email + from name + reply-to.
 
