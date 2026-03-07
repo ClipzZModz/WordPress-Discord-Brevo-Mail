@@ -353,8 +353,33 @@ function wdbm_discord_enabled() {
 	return ! empty( $settings['discord_enabled'] ) && ! empty( $settings['discord_webhook'] );
 }
 
+function wdbm_get_discord_status() {
+	$settings = wdbm_get_settings();
+
+	if ( empty( $settings['discord_enabled'] ) ) {
+		return array(
+			'enabled' => false,
+			'message' => 'Discord disabled in settings.',
+		);
+	}
+
+	if ( empty( $settings['discord_webhook'] ) ) {
+		return array(
+			'enabled' => false,
+			'message' => 'Discord webhook URL is missing.',
+		);
+	}
+
+	return array(
+		'enabled' => true,
+		'message' => 'Discord is enabled and ready.',
+	);
+}
+
 function wdbm_send_discord_embed( $title, $description, $fields = array(), $color = 3447003, $event = 'unknown' ) {
-	if ( ! wdbm_discord_enabled() ) {
+	$discord_status = wdbm_get_discord_status();
+	if ( ! $discord_status['enabled'] ) {
+		wdbm_log_event( 'discord', $event, 'skipped', $discord_status['message'] );
 		return false;
 	}
 
@@ -383,6 +408,8 @@ function wdbm_send_discord_embed( $title, $description, $fields = array(), $colo
 		),
 	);
 
+	wdbm_log_event( 'discord', $event, 'attempt', 'Sending webhook request.', $payload );
+
 	$response = wp_remote_post(
 		$webhook,
 		array(
@@ -401,6 +428,11 @@ function wdbm_send_discord_embed( $title, $description, $fields = array(), $colo
 
 	$code = wp_remote_retrieve_response_code( $response );
 	if ( $code < 200 || $code >= 300 ) {
+		$response_body = wp_remote_retrieve_body( $response );
+		$payload['response_code'] = $code;
+		if ( ! empty( $response_body ) ) {
+			$payload['response_body'] = wp_strip_all_tags( (string) $response_body );
+		}
 		wdbm_log_event( 'discord', $event, 'failed', 'HTTP ' . $code, $payload );
 		return false;
 	}
@@ -450,16 +482,20 @@ function wdbm_is_other_smtp_active() {
 add_action( 'wpcf7_mail_sent', 'wdbm_handle_cf7_submission' );
 
 function wdbm_handle_cf7_submission( $contact_form ) {
-	if ( ! wdbm_discord_enabled() ) {
+	$discord_status = wdbm_get_discord_status();
+	if ( ! $discord_status['enabled'] ) {
+		wdbm_log_event( 'discord', 'contact_form_7', 'skipped', $discord_status['message'] );
 		return;
 	}
 
 	if ( ! class_exists( 'WPCF7_Submission' ) ) {
+		wdbm_log_event( 'discord', 'contact_form_7', 'skipped', 'WPCF7_Submission class not available.' );
 		return;
 	}
 
 	$submission = WPCF7_Submission::get_instance();
 	if ( ! $submission ) {
+		wdbm_log_event( 'discord', 'contact_form_7', 'skipped', 'No Contact Form 7 submission instance found.' );
 		return;
 	}
 
@@ -504,7 +540,9 @@ function wdbm_handle_cf7_submission( $contact_form ) {
 add_action( 'wpforms_process_complete', 'wdbm_handle_wpforms_submission', 10, 4 );
 
 function wdbm_handle_wpforms_submission( $fields, $entry, $form_data, $entry_id ) {
-	if ( ! wdbm_discord_enabled() ) {
+	$discord_status = wdbm_get_discord_status();
+	if ( ! $discord_status['enabled'] ) {
+		wdbm_log_event( 'discord', 'wpforms', 'skipped', $discord_status['message'] );
 		return;
 	}
 
@@ -546,7 +584,9 @@ function wdbm_handle_wpforms_submission( $fields, $entry, $form_data, $entry_id 
 add_action( 'gform_after_submission', 'wdbm_handle_gravityforms_submission', 10, 2 );
 
 function wdbm_handle_gravityforms_submission( $entry, $form ) {
-	if ( ! wdbm_discord_enabled() ) {
+	$discord_status = wdbm_get_discord_status();
+	if ( ! $discord_status['enabled'] ) {
+		wdbm_log_event( 'discord', 'gravity_forms', 'skipped', $discord_status['message'] );
 		return;
 	}
 

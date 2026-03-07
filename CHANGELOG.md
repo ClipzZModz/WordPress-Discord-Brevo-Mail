@@ -14,3 +14,10 @@ All notable changes to this project will be documented in this file.
 ### Added
 - WPForms and Gravity Forms Discord embed notifications.
 - Brevo defer mode when another SMTP plugin is active.
+
+## [0.1.2] - 2026-03-07
+### Changed
+- Expanded Discord logging to record skipped reasons when Discord is disabled or misconfigured.
+- Added explicit Discord webhook attempt logs before each outbound request.
+- Improved Discord failure logs to include HTTP response details for webhook troubleshooting.
+- Added skip diagnostics in CF7, WPForms, and Gravity Forms handlers when Discord cannot run.
