@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-03-12
+### Changed
+- Added stricter Discord webhook URL validation (HTTPS + Discord host + webhook path format).
+- Added Discord payload guardrails to respect embed limits (field count, per-field length, and overall embed size).
+- Added webhook retry behavior for transient failures, including HTTP 429 rate limits and 5xx server responses.
+- Improved Discord attempt logging with per-attempt metadata for easier troubleshooting.
+- Added channel filters to the logs page (`All Logs`, `Discord`, `Brevo`) for faster troubleshooting.
+- Added per-row `View` action on logs to expand technical payload details for both Discord and Brevo entries.
+
 ## [0.1.0] - 2026-01-28
 ### Added
 - Discord embed notifications for Contact Form 7 submissions.

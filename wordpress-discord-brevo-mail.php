@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WordPress Discord & Brevo Mail
  * Description: Sends Discord embeds for Contact Form 7 submissions and routes WordPress mail through Brevo when enabled.
- * Version: 0.1.0
+ * Version: 0.1.3
  * Author: Jack Parlby
  * License: GPLv2 or later
  */
@@ -11,9 +11,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WDBM_VERSION', '0.1.0' );
+define( 'WDBM_VERSION', '0.1.3' );
 define( 'WDBM_OPTION_KEY', 'wdbm_settings' );
 define( 'WDBM_LOG_TABLE', 'wdbm_logs' );
+define( 'WDBM_DISCORD_MAX_FIELDS', 25 );
+define( 'WDBM_DISCORD_MAX_TITLE', 256 );
+define( 'WDBM_DISCORD_MAX_DESCRIPTION', 4096 );
+define( 'WDBM_DISCORD_MAX_FIELD_NAME', 256 );
+define( 'WDBM_DISCORD_MAX_FIELD_VALUE', 1024 );
+define( 'WDBM_DISCORD_MAX_TOTAL_CHARS', 6000 );
 
 register_activation_hook( __FILE__, 'wdbm_activate' );
 
@@ -201,6 +207,9 @@ function wdbm_sanitize_settings( $input ) {
 
 	$clean['discord_enabled']  = isset( $input['discord_enabled'] ) ? 1 : 0;
 	$clean['discord_webhook']  = isset( $input['discord_webhook'] ) ? esc_url_raw( $input['discord_webhook'] ) : '';
+	if ( ! empty( $clean['discord_webhook'] ) && ! wdbm_is_valid_discord_webhook( $clean['discord_webhook'] ) ) {
+		$clean['discord_webhook'] = '';
+	}
 
 	$clean['brevo_defer_smtp'] = isset( $input['brevo_defer_smtp'] ) ? 1 : 0;
 	$clean['brevo_enabled']    = isset( $input['brevo_enabled'] ) ? 1 : 0;
@@ -257,20 +266,70 @@ function wdbm_render_logs_page() {
 	$per_page = 50;
 	$page = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
 	$offset = ( $page - 1 ) * $per_page;
+	$channel = isset( $_GET['channel'] ) ? sanitize_key( wp_unslash( $_GET['channel'] ) ) : 'all';
+	$allowed_channels = array( 'all', 'discord', 'brevo' );
+	if ( ! in_array( $channel, $allowed_channels, true ) ) {
+		$channel = 'all';
+	}
 
-	$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table_name}" );
-	$rows = $wpdb->get_results(
-		$wpdb->prepare(
-			"SELECT * FROM {$table_name} ORDER BY created_at DESC LIMIT %d OFFSET %d",
-			$per_page,
-			$offset
-		)
-	);
+	$where_sql = '';
+	$where_args = array();
+	if ( $channel !== 'all' ) {
+		$where_sql = ' WHERE channel = %s';
+		$where_args[] = $channel;
+	}
+
+	$count_sql = "SELECT COUNT(*) FROM {$table_name}{$where_sql}";
+	if ( ! empty( $where_args ) ) {
+		$total = (int) $wpdb->get_var( $wpdb->prepare( $count_sql, $where_args ) );
+	} else {
+		$total = (int) $wpdb->get_var( $count_sql );
+	}
+
+	$list_sql = "SELECT * FROM {$table_name}{$where_sql} ORDER BY created_at DESC LIMIT %d OFFSET %d";
+	$list_args = $where_args;
+	$list_args[] = $per_page;
+	$list_args[] = $offset;
+	$rows = $wpdb->get_results( $wpdb->prepare( $list_sql, $list_args ) );
 
 	$total_pages = $total > 0 ? (int) ceil( $total / $per_page ) : 1;
+	$base_url = remove_query_arg( array( 'paged', 'channel' ) );
+	$channel_links = array(
+		'all'     => add_query_arg( 'channel', 'all', $base_url ),
+		'discord' => add_query_arg( 'channel', 'discord', $base_url ),
+		'brevo'   => add_query_arg( 'channel', 'brevo', $base_url ),
+	);
 	?>
 	<div class="wrap">
 		<h1>Send Logs</h1>
+		<ul class="subsubsub">
+			<li>
+				<a href="<?php echo esc_url( $channel_links['all'] ); ?>" class="<?php echo ( 'all' === $channel ) ? 'current' : ''; ?>">All Logs</a> |
+			</li>
+			<li>
+				<a href="<?php echo esc_url( $channel_links['discord'] ); ?>" class="<?php echo ( 'discord' === $channel ) ? 'current' : ''; ?>">Discord</a> |
+			</li>
+			<li>
+				<a href="<?php echo esc_url( $channel_links['brevo'] ); ?>" class="<?php echo ( 'brevo' === $channel ) ? 'current' : ''; ?>">Brevo</a>
+			</li>
+		</ul>
+		<style>
+			.wdbm-log-details {
+				display: none;
+				background: #f6f7f7;
+			}
+			.wdbm-log-details.open {
+				display: table-row;
+			}
+			.wdbm-log-details pre {
+				margin: 0;
+				padding: 12px;
+				background: #fff;
+				border: 1px solid #dcdcde;
+				white-space: pre-wrap;
+				word-break: break-word;
+			}
+		</style>
 		<table class="widefat fixed striped">
 			<thead>
 				<tr>
@@ -279,22 +338,49 @@ function wdbm_render_logs_page() {
 					<th>Event</th>
 					<th>Status</th>
 					<th>Message</th>
+					<th>Actions</th>
 				</tr>
 			</thead>
 			<tbody>
 				<?php if ( empty( $rows ) ) : ?>
 					<tr>
-						<td colspan="5">No logs yet.</td>
+						<td colspan="6">No logs yet.</td>
 					</tr>
 				<?php else : ?>
 					<?php foreach ( $rows as $row ) : ?>
+						<?php
+						$details_id = 'wdbm-log-details-' . absint( $row->id );
+						$decoded_payload = ! empty( $row->payload ) ? json_decode( $row->payload, true ) : null;
+						if ( is_array( $decoded_payload ) ) {
+							$payload_text = wp_json_encode( $decoded_payload, JSON_PRETTY_PRINT );
+						} elseif ( is_string( $row->payload ) && $row->payload !== '' ) {
+							$payload_text = $row->payload;
+						} else {
+							$payload_text = '';
+						}
+						?>
 						<tr>
 							<td><?php echo esc_html( $row->created_at ); ?></td>
 							<td><?php echo esc_html( $row->channel ); ?></td>
 							<td><?php echo esc_html( $row->event ); ?></td>
 							<td><?php echo esc_html( $row->status ); ?></td>
 							<td><?php echo esc_html( $row->message ); ?></td>
+							<td>
+								<?php if ( '' !== $payload_text ) : ?>
+									<button type="button" class="button button-small wdbm-view-log" data-target="<?php echo esc_attr( $details_id ); ?>">View</button>
+								<?php else : ?>
+									&mdash;
+								<?php endif; ?>
+							</td>
 						</tr>
+						<?php if ( '' !== $payload_text ) : ?>
+							<tr id="<?php echo esc_attr( $details_id ); ?>" class="wdbm-log-details">
+								<td colspan="6">
+									<strong>Technical Details</strong>
+									<pre><?php echo esc_html( $payload_text ); ?></pre>
+								</td>
+							</tr>
+						<?php endif; ?>
 					<?php endforeach; ?>
 				<?php endif; ?>
 			</tbody>
@@ -304,10 +390,10 @@ function wdbm_render_logs_page() {
 			<div class="tablenav">
 				<div class="tablenav-pages">
 					<?php
-					$base_url = remove_query_arg( array( 'paged' ) );
 					echo paginate_links(
 						array(
 							'base'      => add_query_arg( 'paged', '%#%', $base_url ),
+							'add_args'  => array( 'channel' => $channel ),
 							'format'    => '',
 							'prev_text' => '&laquo;',
 							'next_text' => '&raquo;',
@@ -320,6 +406,24 @@ function wdbm_render_logs_page() {
 			</div>
 		<?php endif; ?>
 	</div>
+	<script>
+		document.addEventListener('click', function(event) {
+			var button = event.target.closest('.wdbm-view-log');
+			if (!button) {
+				return;
+			}
+			var targetId = button.getAttribute('data-target');
+			if (!targetId) {
+				return;
+			}
+			var detailRow = document.getElementById(targetId);
+			if (!detailRow) {
+				return;
+			}
+			var isOpen = detailRow.classList.toggle('open');
+			button.textContent = isOpen ? 'Hide' : 'View';
+		});
+	</script>
 	<?php
 }
 
@@ -349,8 +453,180 @@ function wdbm_log_event( $channel, $event, $status, $message = '', $payload = ar
 }
 
 function wdbm_discord_enabled() {
-	$settings = wdbm_get_settings();
-	return ! empty( $settings['discord_enabled'] ) && ! empty( $settings['discord_webhook'] );
+	$discord_status = wdbm_get_discord_status();
+	return ! empty( $discord_status['enabled'] );
+}
+
+function wdbm_is_valid_discord_webhook( $url ) {
+	if ( empty( $url ) || ! wp_http_validate_url( $url ) ) {
+		return false;
+	}
+
+	$parts = wp_parse_url( $url );
+	if ( empty( $parts['scheme'] ) || strtolower( $parts['scheme'] ) !== 'https' ) {
+		return false;
+	}
+
+	$host = isset( $parts['host'] ) ? strtolower( $parts['host'] ) : '';
+	$allowed_hosts = array(
+		'discord.com',
+		'discordapp.com',
+		'ptb.discord.com',
+		'canary.discord.com',
+	);
+	if ( ! in_array( $host, $allowed_hosts, true ) ) {
+		return false;
+	}
+
+	$path = isset( $parts['path'] ) ? $parts['path'] : '';
+	return (bool) preg_match( '#^/api(?:/v\d+)?/webhooks/\d+/[A-Za-z0-9_-]+$#', $path );
+}
+
+function wdbm_discord_string_length( $value ) {
+	if ( function_exists( 'mb_strlen' ) ) {
+		return mb_strlen( $value );
+	}
+
+	return strlen( $value );
+}
+
+function wdbm_discord_string_slice( $value, $max_length ) {
+	if ( $max_length <= 0 ) {
+		return '';
+	}
+
+	if ( function_exists( 'mb_substr' ) ) {
+		return mb_substr( $value, 0, $max_length );
+	}
+
+	return substr( $value, 0, $max_length );
+}
+
+function wdbm_discord_trim_to_limit( $value, $max_length ) {
+	$value = wp_strip_all_tags( (string) $value );
+	if ( wdbm_discord_string_length( $value ) <= $max_length ) {
+		return $value;
+	}
+
+	if ( $max_length <= 3 ) {
+		return wdbm_discord_string_slice( $value, $max_length );
+	}
+
+	return wdbm_discord_string_slice( $value, $max_length - 3 ) . '...';
+}
+
+function wdbm_discord_embed_total_chars( $embed ) {
+	$total = 0;
+	$total += wdbm_discord_string_length( isset( $embed['title'] ) ? (string) $embed['title'] : '' );
+	$total += wdbm_discord_string_length( isset( $embed['description'] ) ? (string) $embed['description'] : '' );
+
+	if ( ! empty( $embed['fields'] ) && is_array( $embed['fields'] ) ) {
+		foreach ( $embed['fields'] as $field ) {
+			$total += wdbm_discord_string_length( isset( $field['name'] ) ? (string) $field['name'] : '' );
+			$total += wdbm_discord_string_length( isset( $field['value'] ) ? (string) $field['value'] : '' );
+		}
+	}
+
+	return $total;
+}
+
+function wdbm_build_discord_payload( $title, $description, $fields, $color ) {
+	$embed_fields = array();
+	$field_count = 0;
+	$omitted_fields = 0;
+
+	foreach ( $fields as $name => $value ) {
+		if ( $field_count >= WDBM_DISCORD_MAX_FIELDS ) {
+			$omitted_fields++;
+			continue;
+		}
+
+		$field_name = wdbm_discord_trim_to_limit( $name, WDBM_DISCORD_MAX_FIELD_NAME );
+		$field_value = wdbm_discord_trim_to_limit( $value, WDBM_DISCORD_MAX_FIELD_VALUE );
+		if ( $field_name === '' ) {
+			$field_name = 'Field';
+		}
+		if ( $field_value === '' ) {
+			$field_value = '(empty)';
+		}
+
+		$embed_fields[] = array(
+			'name'   => $field_name,
+			'value'  => $field_value,
+			'inline' => false,
+		);
+		$field_count++;
+	}
+
+	$embed = array(
+		'title'       => wdbm_discord_trim_to_limit( $title, WDBM_DISCORD_MAX_TITLE ),
+		'description' => wdbm_discord_trim_to_limit( $description, WDBM_DISCORD_MAX_DESCRIPTION ),
+		'color'       => (int) $color,
+		'fields'      => $embed_fields,
+		'timestamp'   => gmdate( 'c' ),
+	);
+
+	$total_chars = wdbm_discord_embed_total_chars( $embed );
+	if ( $total_chars > WDBM_DISCORD_MAX_TOTAL_CHARS ) {
+		$overflow = $total_chars - WDBM_DISCORD_MAX_TOTAL_CHARS;
+		$description_length = wdbm_discord_string_length( $embed['description'] );
+		if ( $description_length > 0 ) {
+			$new_description_length = max( 0, $description_length - $overflow );
+			$embed['description'] = wdbm_discord_trim_to_limit( $embed['description'], $new_description_length );
+		}
+	}
+
+	while ( wdbm_discord_embed_total_chars( $embed ) > WDBM_DISCORD_MAX_TOTAL_CHARS && ! empty( $embed['fields'] ) ) {
+		array_pop( $embed['fields'] );
+		$omitted_fields++;
+	}
+
+	if ( $omitted_fields > 0 ) {
+		$suffix = ' (Additional fields omitted: ' . $omitted_fields . ')';
+		$max_description = WDBM_DISCORD_MAX_DESCRIPTION - wdbm_discord_string_length( $suffix );
+		$embed['description'] = wdbm_discord_trim_to_limit( $embed['description'], max( 0, $max_description ) ) . $suffix;
+	}
+
+	while ( wdbm_discord_embed_total_chars( $embed ) > WDBM_DISCORD_MAX_TOTAL_CHARS && ! empty( $embed['fields'] ) ) {
+		array_pop( $embed['fields'] );
+	}
+
+	return array(
+		'content' => '',
+		'embeds'  => array( $embed ),
+	);
+}
+
+function wdbm_discord_get_retry_delay_ms( $response ) {
+	$default_delay_ms = 1000;
+	$body = wp_remote_retrieve_body( $response );
+	if ( empty( $body ) ) {
+		return $default_delay_ms;
+	}
+
+	$data = json_decode( $body, true );
+	if ( ! is_array( $data ) || ! isset( $data['retry_after'] ) ) {
+		return $default_delay_ms;
+	}
+
+	$retry_after = (float) $data['retry_after'];
+	if ( $retry_after <= 0 ) {
+		return $default_delay_ms;
+	}
+
+	// Some APIs return seconds; others return milliseconds.
+	if ( $retry_after < 100 ) {
+		return (int) ceil( $retry_after * 1000 );
+	}
+
+	return (int) ceil( $retry_after );
+}
+
+function wdbm_discord_sleep_ms( $delay_ms ) {
+	$delay_ms = max( 0, (int) $delay_ms );
+	if ( $delay_ms > 0 ) {
+		usleep( $delay_ms * 1000 );
+	}
 }
 
 function wdbm_get_discord_status() {
@@ -370,6 +646,13 @@ function wdbm_get_discord_status() {
 		);
 	}
 
+	if ( ! wdbm_is_valid_discord_webhook( $settings['discord_webhook'] ) ) {
+		return array(
+			'enabled' => false,
+			'message' => 'Discord webhook URL is invalid. Use a full Discord webhook URL.',
+		);
+	}
+
 	return array(
 		'enabled' => true,
 		'message' => 'Discord is enabled and ready.',
@@ -386,59 +669,67 @@ function wdbm_send_discord_embed( $title, $description, $fields = array(), $colo
 	$settings = wdbm_get_settings();
 	$webhook = $settings['discord_webhook'];
 
-	$embed_fields = array();
-	foreach ( $fields as $name => $value ) {
-		$embed_fields[] = array(
-			'name'   => wp_strip_all_tags( (string) $name ),
-			'value'  => wp_strip_all_tags( (string) $value ),
-			'inline' => false,
-		);
-	}
+	$payload = wdbm_build_discord_payload( $title, $description, $fields, $color );
+	$max_attempts = 3;
 
-	$payload = array(
-		'content' => '',
-		'embeds'  => array(
+	for ( $attempt = 1; $attempt <= $max_attempts; $attempt++ ) {
+		$attempt_payload = $payload;
+		$attempt_payload['attempt'] = $attempt;
+		wdbm_log_event( 'discord', $event, 'attempt', 'Sending webhook request.', $attempt_payload );
+
+		$response = wp_remote_post(
+			$webhook,
 			array(
-				'title'       => $title,
-				'description' => $description,
-				'color'       => $color,
-				'fields'      => $embed_fields,
-				'timestamp'   => gmdate( 'c' ),
-			),
-		),
-	);
+				'headers' => array(
+					'Content-Type' => 'application/json',
+				),
+				'timeout' => 10,
+				'body'    => wp_json_encode( $payload ),
+			)
+		);
 
-	wdbm_log_event( 'discord', $event, 'attempt', 'Sending webhook request.', $payload );
-
-	$response = wp_remote_post(
-		$webhook,
-		array(
-			'headers' => array(
-				'Content-Type' => 'application/json',
-			),
-			'timeout' => 10,
-			'body'    => wp_json_encode( $payload ),
-		)
-	);
-
-	if ( is_wp_error( $response ) ) {
-		wdbm_log_event( 'discord', $event, 'failed', $response->get_error_message(), $payload );
-		return false;
-	}
-
-	$code = wp_remote_retrieve_response_code( $response );
-	if ( $code < 200 || $code >= 300 ) {
-		$response_body = wp_remote_retrieve_body( $response );
-		$payload['response_code'] = $code;
-		if ( ! empty( $response_body ) ) {
-			$payload['response_body'] = wp_strip_all_tags( (string) $response_body );
+		if ( is_wp_error( $response ) ) {
+			$attempt_payload['error'] = $response->get_error_message();
+			if ( $attempt < $max_attempts ) {
+				wdbm_discord_sleep_ms( 750 );
+				continue;
+			}
+			wdbm_log_event( 'discord', $event, 'failed', $response->get_error_message(), $attempt_payload );
+			return false;
 		}
-		wdbm_log_event( 'discord', $event, 'failed', 'HTTP ' . $code, $payload );
+
+		$code = wp_remote_retrieve_response_code( $response );
+		if ( $code >= 200 && $code < 300 ) {
+			wdbm_log_event( 'discord', $event, 'success', 'Sent', $attempt_payload );
+			return true;
+		}
+
+		$response_body = wp_remote_retrieve_body( $response );
+		$attempt_payload['response_code'] = $code;
+		if ( ! empty( $response_body ) ) {
+			$attempt_payload['response_body'] = wp_strip_all_tags( (string) $response_body );
+		}
+
+		if ( $code === 429 && $attempt < $max_attempts ) {
+			$delay_ms = min( 5000, max( 250, wdbm_discord_get_retry_delay_ms( $response ) ) );
+			$attempt_payload['retry_delay_ms'] = $delay_ms;
+			wdbm_log_event( 'discord', $event, 'failed', 'HTTP 429 (rate limited), retrying.', $attempt_payload );
+			wdbm_discord_sleep_ms( $delay_ms );
+			continue;
+		}
+
+		if ( $code >= 500 && $attempt < $max_attempts ) {
+			wdbm_log_event( 'discord', $event, 'failed', 'HTTP ' . $code . ' (server error), retrying.', $attempt_payload );
+			wdbm_discord_sleep_ms( 1000 );
+			continue;
+		}
+
+		wdbm_log_event( 'discord', $event, 'failed', 'HTTP ' . $code, $attempt_payload );
 		return false;
 	}
 
-	wdbm_log_event( 'discord', $event, 'success', 'Sent', $payload );
-	return true;
+	wdbm_log_event( 'discord', $event, 'failed', 'Webhook send failed after retries.', $payload );
+	return false;
 }
 
 function wdbm_send_failure_embed( $context, $error_message ) {
